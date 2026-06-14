@@ -6,7 +6,7 @@
 
 **BCPL** is a hard-sample-aware optimization framework for deep visual detection models. It addresses a critical yet underexplored problem in steel surface defect detection: visually similar defect categories produce *boundary-confusing samples* near class decision boundaries, and standard detectors struggle to discriminate them. BCPL moves beyond isolated hard-sample reweighting — it discovers the latent clustering structure of boundary-confusing samples, extracts representative prototypes, and converts them into staged dynamic loss weights that guide detector training.
 
-![Teaser](assets/net.png)
+
 
 ---
 
