@@ -1,188 +1,192 @@
-# Clustering method for surface defects of steel for periodic defect detection
+# BCPL: Boundary-Confusing Prototype Learning
 
+### Hard-Sample-Aware Steel Surface Defect Detection via Boundary-Confusing Sample Clustering
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-![teaser](assets/net.png)
+**BCPL** is a hard-sample-aware optimization framework for deep visual detection models. It addresses a critical yet underexplored problem in steel surface defect detection: visually similar defect categories produce *boundary-confusing samples* near class decision boundaries, and standard detectors struggle to discriminate them. BCPL moves beyond isolated hard-sample reweighting — it discovers the latent clustering structure of boundary-confusing samples, extracts representative prototypes, and converts them into staged dynamic loss weights that guide detector training.
 
-In the production of steel products, periodic surface defects may arise due to equipment wear or process fluctuations. Intelligent detection and clustering methods offer a promising approach for identifying such defects, enabling timely localization of fault sources, preventing the spread of quality risks, minimizing economic losses, and advancing predictive maintenance and intelligent manufacturing. However, several challenges exist in practical production scenarios: defects of the same type often exhibit significant variation in texture and morphology; spatial periodicity is difficult to maintain strictly; and clustering algorithms must continuously adapt to newly emerging defect patterns.
-	To address these issues, this study proposes a two-stage generalized category discovery framework based on hierarchical distribution alignment regularization (HDAR). The framework leverages existing clustering results as knowledge anchors to implicitly balance the marginal probability distributions between known and unknown classes within each batch, while explicitly promoting prediction consistency within each group. This dual mechanism enables more structured control over the predictive distribution, thereby significantly improving clustering accuracy.Experimental results demonstrate that the proposed method achieves a 4.54% improvement in overall clustering accuracy compared to classical approaches, with a particularly notable gain of 5.87% on unknown categories, highlighting its superior capability in distinguishing novel defect types. This method enhances defect identification and provides timely feedback for equipment maintenance and process optimization, ultimately contributing to improved steel product quality and production stability.
+![Teaser](assets/net.png)
 
-## Running
+---
+
+## Overview
+
+Standard detector training treats hard samples as independent instances and relies on prediction confidence or loss values to adjust their influence. Such sample-level strategies cannot explicitly describe the shared confusion patterns formed by ambiguous samples near category boundaries.
+
+BCPL proposes a **progressive design** that discovers, represents, and uses boundary-confusion structure:
+
+1. **AC-BPL** (Adaptive Clustering-based Boundary Prototype Learning) — identifies high-uncertainty samples near decision boundaries via joint Margin–Entropy selection, organizes them into local confusion clusters through adaptive density clustering, and condenses each cluster into a Medoid boundary prototype.
+2. **BCDR** (Boundary-aware Dynamic Loss Re-weighting) — extends the classification head with boundary prototype dimensions, measures the relative response of class centers vs. boundary prototypes for each sample, and converts the estimated boundary hardness into dynamic loss weights with staged activation.
+
+This shifts hard-sample handling from *sample-level selection* to *prototype-level structure modeling*.
+
+---
+
+## Key Results
+
+| Dataset | Detector | Origin (Hard mAP@50) | Ours (Hard mAP@50) | Improvement |
+|---------|----------|---------------------|-------------------|-------------|
+| NEU-DET | YOLOv8s  | 0.324 | 0.357 | +3.3% |
+| NEU-DET | YOLOv26s | 0.356 | **0.447** | +9.1% |
+| NEU-DET | RF-DETRS | 0.357 | 0.374 | +1.7% |
+| Severstal | YOLOv8s | 0.369 | 0.449 | +8.0% |
+| Severstal | YOLOv26s | 0.598 | 0.606 | +0.8% |
+| Severstal | RF-DETRS | 0.556 | 0.572 | +1.6% |
+| MaSteel | YOLOv8s | 0.828 | 0.854 | +2.6% |
+| MaSteel | YOLOv26s | 0.848 | 0.857 | +0.9% |
+| MaSteel | RF-DETRS | 0.858 | 0.862 | +0.4% |
+
+Consistent improvements across 3 datasets × 3 detectors. The gain is largest when inter-class confusion is most severe (e.g., NEU-DET + YOLOv26s: +9.1%).
+
+Comparison with mainstream hard-sample methods (NEU-DET, YOLOv8s):
+
+| Method | Hard-class mAP@50 | Overall mAP@50 |
+|--------|-------------------|----------------|
+| Origin (Baseline) | 0.324 | 0.671 |
+| + Focal Loss | 0.346 | 0.681 |
+| + OHEM | 0.339 | 0.673 |
+| + LRM Loss | 0.314 | 0.680 |
+| **+ BCPL (Ours)** | **0.357** | **0.692** |
+
+---
+
+## Method Pipeline
+
+### Stage 1: Class Center Learning
+
+A DINO-pretrained ViT-B/16 backbone is fine-tuned (last L Transformer blocks) with a multi-constraint composite loss:
+- **Supervised classification loss** — anchors semantics to labels
+- **Supervised contrastive loss** — intra-class compactness & inter-class separation
+- **Unsupervised contrastive loss** — cross-view consistency & perturbation invariance
+- **Clustering regularizer** — self-distillation + maximum entropy (prevents degeneracy)
+
+Multi-view augmentation (color jitter, flip, crop, blur) produces two views per image; a momentum-like teacher branch enforces cross-view consistency.
+
+### Stage 2: Boundary Prototype Discovery (AC-BPL)
+
+1. **Uncertainty Selection** — Joint Margin + Entropy criterion selects samples that exhibit both strong two-class competition and broad multi-class uncertainty:
+   - Low Margin: $p_{\max}^{(1)} - p_{\max}^{(2)}$ is small
+   - High Entropy: $-\sum p_k \log p_k$ is large
+   - Intersection of bottom-α quantile Margin and top-α quantile Entropy
+
+2. **Adaptive Density Clustering** — on cosine distance with auto-estimated parameters:
+   - `m_min` adapts to boundary set size
+   - `ε` is estimated from the q-quantile of k-NN distances
+   - Fallback: relax ε (1.5× → 2.0× → 3.0×), reduce m_min, or use mean feature
+
+3. **Medoid Prototype Extraction** — For each cluster, select the real sample minimizing total cosine distance to all other members. Medoids are on-manifold and robust to outliers.
+
+### Stage 3: Boundary-Aware Detector Training (BCDR)
+
+1. **Extended Classification Head** — Append boundary prototype dimensions to the original class head. Known-class weights are copied; boundary weights are initialized with prototype directions, rescaled to match the mean L₂ norm.
+
+2. **Boundary Hardness Estimation** — For each sample, compute `s_cls` (max known-class response) and `s_boundary` (max boundary-prototype response). Hardness: `δ = s_boundary − s_cls`.
+
+3. **Dynamic Weight Mapping** — Amplify → Clip → Sigmoid → Normalize:
+   ```
+   w(x) = 1 + η·σ(clip(α·δ, [-β, β]))
+   ```
+   Weights ∈ (1, 1+η), batch-normalized to mean 1.
+
+4. **Staged Activation** — Boundary weights are introduced gradually:
+   - **Warmup stage**: uniform weights (build basic decision boundary)
+   - **Transition stage**: linear ramp from 0 to 1
+   - **Balance stage**: full boundary-aware weights active
+
+---
+
+## Repository Structure
+
+```
+BCPL/
+├── main.py                  # Main training and evaluation script
+├── model.py                 # Model definitions (DINOHead, losses, classifier)
+├── cluster.py               # Clustering utilities (K-Means-based)
+├── cluster_dbscan.py        # Adaptive density clustering (AC-BPL core)
+├── class_magang.py          # Class center learning with multi-constraint loss
+├── config.py                # Dataset paths and experiment configuration
+├── new_run_inference.py     # Inference and prototype extraction
+├── data/                    # Dataset loaders and augmentations
+│   ├── get_datasets.py      # Dataset loading (NEU-DET, GC10-DET, MaSteel, etc.)
+│   ├── augmentations/       # Multi-view data augmentation
+│   └── ssb_splits/          # Open-set recognition splits
+├── scripts/
+│   └── run_xc.sh            # Training launch script
+├── assets/
+│   └── net.png              # Method overview figure
+└── requirements.txt         # Python dependencies
+```
+
+---
+
+## Getting Started
 
 ### Dependencies
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
-### Config
+Main dependencies: PyTorch 1.10+, torchvision, numpy, pandas, scikit-learn, scipy, tqdm, loguru.
 
-Set paths to datasets and desired log directories in ```config.py```
+### Configuration
 
+Set dataset paths and log directories in `config.py`:
+
+```python
+xc_root = '/path/to/your/dataset'
+exp_root = 'dev_outputs'   # Logs and checkpoints
+```
 
 ### Datasets
-We collected five types of periodic defects from steel plants and augmented the dataset with images from the NEU-DET steel surface defect dataset, which contains six defect categories. In total, we constructed a periodic defect dataset comprising 11 classes. Additionally, we selected defect images from the GC10-DET dataset, which includes 10 surface defect categories from other production processes, to conduct cross-scenario validation.
 
-Both datasets are available at the following links:
+Experiments in the paper use three steel surface defect datasets:
 
-* [钢材表面周期性缺陷数据集](https://pan.baidu.com/s/1H2qmxsnHj-ZXrbt5xROGDQ?pwd=1234) and [GC10-DET](https://pan.baidu.com/s/1qbm5eYWiWvcAObg5IzD-Ew?pwd=1234)
+- **NEU-DET** — 6 defect classes, 300 images/class, 200×200 grayscale
+- **Severstal-Steel-Defect** — ~12.5K images, 4+ combined defect categories
+- **MaSteel** — Private real-production dataset with expert annotations
 
+### Training
 
-
-### Scripts
-
-**Train the model**:
-
-```
-bash scripts/run_${DATASET_NAME}.sh
+```bash
+# Run the full pipeline
+bash scripts/run_xc.sh
 ```
 
-## Results
-Our results:
+Or step-by-step:
 
-<table>
-<thead>
-<tr>
-<th>Source</th>
-<th colspan="3">钢材周期性缺陷数据集</th>
-<th colspan="3">GC10-DET</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Method</td>
-<td>All</td>
-<td>Known</td>
-<td>Unknown</td>
-<td>All</td>
-<td>Known</td>
-<td>Unknown</td>
-</tr>
-<tr>
-<td>DINO+k-means</td>
-<td>58.85</td>
-<td>73.23</td>
-<td>53.28</td>
-<td>54.43</td>
-<td>72.84</td>
-<td>42.41</td>
-</tr>
-<tr>
-<td>DINO+semi-kmeans</td>
-<td>67.12</td>
-<td>76.22</td>
-<td>63.60</td>
-<td>63.72</td>
-<td>73.25</td>
-<td>57.51</td>
-</tr>
-<tr>
-<td>GCD</td>
-<td>88.88</td>
-<td>98.92</td>
-<td>85.00</td>
-<td>69.62</td>
-<td>95.99</td>
-<td>52.42</td>
-</tr>
-<tr>
-<td>DCCL</td>
-<td>63.54</td>
-<td>83.09</td>
-<td>55.98</td>
-<td>67.38</td>
-<td>74.07</td>
-<td>63.02</td>
-</tr>
-<tr>
-<td>GPC</td>
-<td>77.11</td>
-<td>60.22</td>
-<td>83.64</td>
-<td>66.25</td>
-<td>75.31</td>
-<td>60.34</td>
-</tr>
-<tr>
-<td>CMS</td>
-<td>73.95</td>
-<td>98.28</td>
-<td>64.55</td>
-<td>74.86</td>
-<td>94.14</td>
-<td>62.28</td>
-</tr>
-<tr>
-<td>SimGCD</td>
-<td>87.01</td>
-<td>85.08</td>
-<td>87.76</td>		
-<td>69.42</td>
-<td>89.92</td>
-<td>56.04</td>
-</tr>
-<tr>
-<td>PPC-DCR</td>
-<td>87.95</td>
-<td>97.47</td>
-<td>84.27</td>
-<td>64.82</td>
-<td>81.06</td>
-<td>54.22</td>
-</tr>
-<tr>
-<td>LegoGCD</td>
-<td>81.69</td>
-<td>95.39</td>
-<td>76.40</td>
-<td>70.51</td>
-<td>88.89</td>
-<td>58.52</td>
-</tr>
-<tr>
-<td>BPCL-GCD</td>
-<td>86.79</td>
-<td>91.68</td>
-<td>87.27</td>
-<td>69.13</td>
-<td>88.99</td>
-<td>56.17</td>
-</tr>
-<tr>
-<td>SimGCD*</td>
-<td>90.34</td>
-<td>96.56</td>
-<td>87.94</td>
-<td>74.25</td>
-<td>80.66</td>
-<td>70.07</td>
-</tr>
-<tr>
-<td>Happy*</td>
-<td>91.83</td>
-<td>97.74</td>
-<td>89.55</td>	
-<td>75.71</td>
-<td>87.96</td>
-<td>67.72</td>
-</tr>
-<tr>
-<td>HDAR(Ours)</td>
-<td>94.88</td>
-<td>97.65</td>
-<td>93.81</td>	
-<td>80.42</td>
-<td>92.08</td>
-<td>72.82</td>
-</tr>
-</tbody>
-</table>
+```bash
+# Stage 1: Class center learning with multi-constraint loss
+python main.py --dataset xc --mode train
 
+# Stage 2: Boundary prototype extraction (automatic after training)
+
+# Stage 3: Detector training with BCDR (integrated into detection pipeline)
+```
+
+---
+
+## Citation
+
+If you find this work useful, please cite:
+
+```bibtex
+@article{yang2025boundary,
+  title={Boundary-Confusing Sample Clustering for Hard-Sample-Aware Steel Surface Defect Detection},
+  author={Yang, Songpu and Ma, Boyuan and Zhou, Peng},
+  journal={Expert Systems with Applications},
+  year={2025},
+  publisher={Elsevier}
+}
+```
+
+---
 
 ## Acknowledgements
 
-The codebase is largely built on this repo: https://github.com/CVMI-Lab/SimGCD.
+This work was supported by the National Science and Technology Major Project under Grant 2024ZD0608200. The computing work is supported by USTB MatCom of the Beijing Advanced Innovation Center for Materials Genome Engineering. The codebase builds in part on [SimGCD](https://github.com/CVMI-Lab/SimGCD).
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
