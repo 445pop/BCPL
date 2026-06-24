@@ -1,192 +1,150 @@
-# BCPL: Boundary-Confusing Prototype Learning
+# BCPL: Boundary-Confusion Prototype Learning
 
-### Hard-Sample-Aware Steel Surface Defect Detection via Boundary-Confusing Sample Clustering
+## Hard-Sample-Aware Steel Surface Defect Detection via Boundary-Confusing Sample Clustering
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+BCPL is a hard-sample-aware optimization framework for steel surface defect detection. It focuses on boundary-confusing samples, namely samples near inter-class decision boundaries where visually similar defect categories are easily misidentified.
 
-**BCPL** is a hard-sample-aware optimization framework for deep visual detection models. It addresses a critical yet underexplored problem in steel surface defect detection: visually similar defect categories produce *boundary-confusing samples* near class decision boundaries, and standard detectors struggle to discriminate them. BCPL moves beyond isolated hard-sample reweighting — it discovers the latent clustering structure of boundary-confusing samples, extracts representative prototypes, and converts them into staged dynamic loss weights that guide detector training.
-
-
-
----
+Unlike conventional hard-sample mining methods that reweight isolated samples according to confidence, loss, gradient, or matching quality, BCPL explicitly models the latent structure of boundary-confusing samples. It first discovers local boundary-confusion groups, summarizes them with representative prototypes, and then uses these prototypes to guide detector training through staged dynamic loss re-weighting.
 
 ## Overview
 
-Standard detector training treats hard samples as independent instances and relies on prediction confidence or loss values to adjust their influence. Such sample-level strategies cannot explicitly describe the shared confusion patterns formed by ambiguous samples near category boundaries.
+BCPL consists of two coupled modules:
 
-BCPL proposes a **progressive design** that discovers, represents, and uses boundary-confusion structure:
+1. **Adaptive Clustering-based Boundary Prototype Learning (AC-BPL)**  
+   AC-BPL selects high-uncertainty samples using joint Margin and Entropy criteria, groups boundary-confusing samples through adaptive density clustering, and extracts a Medoid from each cluster as a boundary prototype.
 
-1. **AC-BPL** (Adaptive Clustering-based Boundary Prototype Learning) — identifies high-uncertainty samples near decision boundaries via joint Margin–Entropy selection, organizes them into local confusion clusters through adaptive density clustering, and condenses each cluster into a Medoid boundary prototype.
-2. **BCDR** (Boundary-aware Dynamic Loss Re-weighting) — extends the classification head with boundary prototype dimensions, measures the relative response of class centers vs. boundary prototypes for each sample, and converts the estimated boundary hardness into dynamic loss weights with staged activation.
+2. **Boundary-aware Dynamic Loss Re-weighting (BCDR)**  
+   BCDR appends the discovered boundary prototypes as boundary-prototype output dimensions to the learned class-center projector. It then compares original-class responses and boundary-prototype responses to estimate boundary hardness and convert it into staged dynamic loss weights for downstream detector training.
 
-This shifts hard-sample handling from *sample-level selection* to *prototype-level structure modeling*.
-
----
-
-## Key Results
-
-| Dataset | Detector | Origin (Hard mAP@50) | Ours (Hard mAP@50) | Improvement |
-|---------|----------|---------------------|-------------------|-------------|
-| NEU-DET | YOLOv8s  | 0.324 | 0.357 | +3.3% |
-| NEU-DET | YOLOv26s | 0.356 | **0.447** | +9.1% |
-| NEU-DET | RF-DETRS | 0.357 | 0.374 | +1.7% |
-| Severstal | YOLOv8s | 0.369 | 0.449 | +8.0% |
-| Severstal | YOLOv26s | 0.598 | 0.606 | +0.8% |
-| Severstal | RF-DETRS | 0.556 | 0.572 | +1.6% |
-| MaSteel | YOLOv8s | 0.828 | 0.854 | +2.6% |
-| MaSteel | YOLOv26s | 0.848 | 0.857 | +0.9% |
-| MaSteel | RF-DETRS | 0.858 | 0.862 | +0.4% |
-
-Consistent improvements across 3 datasets × 3 detectors. The gain is largest when inter-class confusion is most severe (e.g., NEU-DET + YOLOv26s: +9.1%).
-
-Comparison with mainstream hard-sample methods (NEU-DET, YOLOv8s):
-
-| Method | Hard-class mAP@50 | Overall mAP@50 |
-|--------|-------------------|----------------|
-| Origin (Baseline) | 0.324 | 0.671 |
-| + Focal Loss | 0.346 | 0.681 |
-| + OHEM | 0.339 | 0.673 |
-| + LRM Loss | 0.314 | 0.680 |
-| **+ BCPL (Ours)** | **0.357** | **0.692** |
-
----
+This design changes hard-sample optimization from sample-level emphasis to prototype-level boundary-structure modeling.
 
 ## Method Pipeline
 
-### Stage 1: Class Center Learning
+### Stage 1: Class-Center Learning
 
-A DINO-pretrained ViT-B/16 backbone is fine-tuned (last L Transformer blocks) with a multi-constraint composite loss:
-- **Supervised classification loss** — anchors semantics to labels
-- **Supervised contrastive loss** — intra-class compactness & inter-class separation
-- **Unsupervised contrastive loss** — cross-view consistency & perturbation invariance
-- **Clustering regularizer** — self-distillation + maximum entropy (prevents degeneracy)
+BCPL uses a DINO-pretrained ViT-B/16 backbone and a class-center projector to learn discriminative defect representations. Only the last Transformer block of the DINO ViT-B/16 backbone is fine-tuned.
 
-Multi-view augmentation (color jitter, flip, crop, blur) produces two views per image; a momentum-like teacher branch enforces cross-view consistency.
+The class-center learning objective combines:
 
-### Stage 2: Boundary Prototype Discovery (AC-BPL)
+- supervised classification loss for label-aware semantic anchoring;
+- supervised contrastive loss for intra-class compactness and inter-class separation;
+- unsupervised contrastive loss for cross-view consistency;
+- clustering regularization with self-distillation and maximum-entropy constraints.
 
-1. **Uncertainty Selection** — Joint Margin + Entropy criterion selects samples that exhibit both strong two-class competition and broad multi-class uncertainty:
-   - Low Margin: $p_{\max}^{(1)} - p_{\max}^{(2)}$ is small
-   - High Entropy: $-\sum p_k \log p_k$ is large
-   - Intersection of bottom-α quantile Margin and top-α quantile Entropy
+Two augmented views are generated for each image during representation learning.
 
-2. **Adaptive Density Clustering** — on cosine distance with auto-estimated parameters:
-   - `m_min` adapts to boundary set size
-   - `ε` is estimated from the q-quantile of k-NN distances
-   - Fallback: relax ε (1.5× → 2.0× → 3.0×), reduce m_min, or use mean feature
+### Stage 2: Boundary Prototype Discovery with AC-BPL
 
-3. **Medoid Prototype Extraction** — For each cluster, select the real sample minimizing total cosine distance to all other members. Medoids are on-manifold and robust to outliers.
+After class-center learning, all training samples are scored by the learned projector. Boundary candidates are selected by the intersection of:
 
-### Stage 3: Boundary-Aware Detector Training (BCDR)
+- low-Margin samples, where the top two class responses are close;
+- high-Entropy samples, where the prediction distribution is broadly uncertain.
 
-1. **Extended Classification Head** — Append boundary prototype dimensions to the original class head. Known-class weights are copied; boundary weights are initialized with prototype directions, rescaled to match the mean L₂ norm.
+The selected samples are clustered with adaptive density clustering. For each discovered boundary-confusion cluster, BCPL selects the Medoid, a real sample closest to other samples in the same cluster, as the boundary prototype.
 
-2. **Boundary Hardness Estimation** — For each sample, compute `s_cls` (max known-class response) and `s_boundary` (max boundary-prototype response). Hardness: `δ = s_boundary − s_cls`.
+### Stage 3: Boundary-Aware Detector Training with BCDR
 
-3. **Dynamic Weight Mapping** — Amplify → Clip → Sigmoid → Normalize:
-   ```
-   w(x) = 1 + η·σ(clip(α·δ, [-β, β]))
-   ```
-   Weights ∈ (1, 1+η), batch-normalized to mean 1.
+The learned class-center projector is expanded with boundary-prototype output dimensions. The original dimensions describe original defect-class responses, and the appended dimensions describe boundary-prototype responses.
 
-4. **Staged Activation** — Boundary weights are introduced gradually:
-   - **Warmup stage**: uniform weights (build basic decision boundary)
-   - **Transition stage**: linear ramp from 0 to 1
-   - **Balance stage**: full boundary-aware weights active
+For each training sample, BCDR compares:
 
----
+- the strongest original-class response;
+- the strongest boundary-prototype response.
 
-## Repository Structure
+Their relative strength is mapped to a dynamic classification loss weight. The weight is introduced with a staged schedule: a warmup stage, a transition stage, and a final boundary-aware training stage.
 
-```
-BCPL/
-├── main.py                  # Main training and evaluation script
-├── model.py                 # Model definitions (DINOHead, losses, classifier)
-├── cluster.py               # Clustering utilities (K-Means-based)
-├── cluster_dbscan.py        # Adaptive density clustering (AC-BPL core)
-├── class_magang.py          # Class center learning with multi-constraint loss
-├── config.py                # Dataset paths and experiment configuration
-├── new_run_inference.py     # Inference and prototype extraction
-├── data/                    # Dataset loaders and augmentations
-│   ├── get_datasets.py      # Dataset loading (NEU-DET, GC10-DET, MaSteel, etc.)
-│   ├── augmentations/       # Multi-view data augmentation
-│   └── ssb_splits/          # Open-set recognition splits
-├── scripts/
-│   └── run_xc.sh            # Training launch script
-├── assets/
-│   └── net.png              # Method overview figure
-└── requirements.txt         # Python dependencies
-```
+## Key Results
 
----
+### Main Detection Results
 
-## Getting Started
+The paper evaluates BCPL on three steel surface defect datasets and three representative detectors. Results are reported as mAP@50. Values in parentheses denote percentage-point changes over the corresponding detector baseline.
 
-### Dependencies
+| Method | NEU-DET Hard | NEU-DET Overall | Severstal Hard | Severstal Overall | MaSteel Hard | MaSteel Overall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| YOLOv8s | 0.324 | 0.671 | 0.369 | 0.393 | 0.828 | 0.671 |
+| YOLOv8s+BCPL | **0.357 (+3.3%)** | **0.692 (+2.1%)** | **0.409 (+4.0%)** | **0.399 (+0.6%)** | **0.854 (+2.6%)** | **0.692 (+2.1%)** |
+| YOLOv26s | 0.356 | 0.688 | 0.598 | 0.495 | 0.848 | **0.701** |
+| YOLOv26s+BCPL | **0.407 (+5.1%)** | **0.705 (+1.7%)** | **0.606 (+0.8%)** | **0.502 (+0.7%)** | **0.863 (+1.5%)** | 0.695 (-0.6%) |
+| RF-DETRS | 0.357 | 0.672 | 0.556 | 0.441 | 0.858 | 0.712 |
+| RF-DETRS+BCPL | **0.374 (+1.7%)** | **0.688 (+1.6%)** | **0.572 (+1.6%)** | **0.452 (+1.1%)** | **0.872 (+1.4%)** | **0.727 (+1.5%)** |
 
-```bash
-pip install -r requirements.txt
-```
+### Comparison with Hard-Sample Methods
 
-Main dependencies: PyTorch 1.10+, torchvision, numpy, pandas, scikit-learn, scipy, tqdm, loguru.
+The comparison with representative hard-sample and quality-aware reweighting methods is conducted on NEU-DET with YOLOv8s.
 
-### Configuration
+| Method | Venue | Hard-class mAP@50 | Overall mAP@50 |
+| --- | --- | ---: | ---: |
+| YOLOv8s Origin | -- | 0.324 | 0.671 |
+| YOLOv8s + Focal Loss | ICCV 2017 | 0.326 (+0.2%) | 0.667 (-0.4%) |
+| YOLOv8s + OHEM | CVPR 2016 | 0.339 (+1.5%) | 0.673 (+0.2%) |
+| YOLOv8s + LRM Loss | IJCNN 2018 | 0.314 (-1.0%) | 0.680 (+0.9%) |
+| YOLOv8s + Quality Focal Loss | NeurIPS 2020 | 0.335 (+1.1%) | 0.688 (+1.7%) |
+| YOLOv8s + Varifocal Loss | CVPR 2021 | 0.336 (+1.2%) | **0.697 (+2.6%)** |
+| YOLOv8s + TF Loss | IEEE TGRS 2025 | 0.310 (-1.4%) | 0.654 (-1.7%) |
+| YOLOv8s + MAL | CVPR 2025 | 0.319 (-0.5%) | 0.674 (+0.3%) |
+| YOLOv8s + BCPL | Ours | **0.357 (+3.3%)** | 0.692 (+2.1%) |
 
-Set dataset paths and log directories in `config.py`:
+These results show that BCPL achieves the best hard-class mAP among the compared methods, supporting the paper's main claim that explicit boundary-confusion structure modeling is more effective than directly reweighting individual hard samples.
 
-```python
-xc_root = '/path/to/your/dataset'
-exp_root = 'dev_outputs'   # Logs and checkpoints
-```
+## Datasets
 
-### Datasets
+The experiments use three steel surface defect datasets:
 
-Experiments in the paper use three steel surface defect datasets:
+- **NEU-DET**: a benchmark steel surface defect dataset with six defect classes, 300 images per class, and 200x200 grayscale images.
+- **Severstal-Steel-Defect**: an industrial strip-steel defect dataset with about 12,568 training images and pixel-level annotations covering four major defect categories and their combinations.
+- **MaSteel**: a private production-line steel defect dataset annotated by quality-inspection experts.
 
-- **NEU-DET** — 6 defect classes, 300 images/class, 200×200 grayscale
-- **Severstal-Steel-Defect** — ~12.5K images, 4+ combined defect categories
-- **MaSteel** — Private real-production dataset with expert annotations
+The paper reports both overall mAP@50 over all classes and hard-class mAP@50 over visually ambiguous defect categories.
 
-### Training
+## Experimental Details
 
-```bash
-# Run the full pipeline
-bash scripts/run_xc.sh
-```
+For class-center learning, the paper uses:
 
-Or step-by-step:
+- DINO ViT-B/16 as the pretrained backbone;
+- input image size of 224;
+- feature dimension of 768;
+- a 3-layer projection head;
+- SGD optimizer with initial learning rate 0.1, momentum 0.9, weight decay 1e-4;
+- 100 training epochs with cosine annealing.
 
-```bash
-# Stage 1: Class center learning with multi-constraint loss
-python main.py --dataset xc --mode train
+BCPL-specific hyperparameters are fixed across datasets and detectors:
 
-# Stage 2: Boundary prototype extraction (automatic after training)
+- class-center learning loss weights: lambda_cls = 0.65, lambda_cluster = 0.35, lambda_unsup = 0.35, lambda_sup = 0.65;
+- boundary selection: alpha_M = 0.1 and alpha_H = 0.1;
+- adaptive density clustering: q = 0.3, lower epsilon bound = 0.05, fallback radius multipliers = 1.5, 2.0, and 3.0;
+- BCDR weight mapping: alpha = 5, beta = 3, eta = 1.0;
+- detector training: 300 epochs, staged activation starts at epoch 30 and uses a 60-epoch transition stage.
 
-# Stage 3: Detector training with BCDR (integrated into detection pipeline)
+## Usage
+
+The public code repository is maintained at:
+
+```text
+https://github.com/445pop/BCPL
 ```
 
----
+The implementation follows the paper's three-stage workflow:
+
+1. learn class-center representations;
+2. mine boundary-confusing samples and extract Medoid prototypes;
+3. train the detector with boundary-aware dynamic loss re-weighting.
+
+Please configure dataset paths and detector settings according to your local environment before running experiments.
 
 ## Citation
 
-If you find this work useful, please cite:
+This manuscript is currently under review. A formal citation entry will be provided after publication.
 
-```bibtex
-@article{yang2025boundary,
-  title={Boundary-Confusing Sample Clustering for Hard-Sample-Aware Steel Surface Defect Detection},
-  author={Yang, Songpu and Ma, Boyuan and Zhou, Peng},
-  journal={Expert Systems with Applications},
-  year={2025},
-  publisher={Elsevier}
-}
+For now, please cite the work as:
+
+```text
+Boundary-Confusion Prototype Learning (BCPL), manuscript under review.
 ```
-
----
 
 ## Acknowledgements
 
-This work was supported by the National Science and Technology Major Project under Grant 2024ZD0608200. The computing work is supported by USTB MatCom of the Beijing Advanced Innovation Center for Materials Genome Engineering. The codebase builds in part on [SimGCD](https://github.com/CVMI-Lab/SimGCD).
+This work builds on prior research in self-supervised representation learning, prototype learning, density-based clustering, and hard-sample-aware object detection. The implementation also benefits from open-source detector and representation-learning codebases.
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+Please refer to the repository license file for usage terms.
